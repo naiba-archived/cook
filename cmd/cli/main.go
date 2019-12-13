@@ -48,7 +48,7 @@ func main() {
 		panic(err)
 	}
 	fmt.Println(welcome)
-	log.Printf("load %d servers, %d tags.", len(dao.Servers), len(dao.Tags))
+	log.Printf("load %d servers, %d tags.", len(dao.Config.Servers), len(dao.Tags))
 	log.Printf("configFile: %s", configFilePath)
 
 	cli()

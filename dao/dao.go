@@ -7,6 +7,8 @@ var (
 	Servers map[string][]*model.Server
 	// Tags ..
 	Tags []string
+	// Config ..
+	Config *model.Config
 )
 
 func init() {
@@ -15,19 +17,20 @@ func init() {
 
 // LoadConfig ..
 func LoadConfig(configFilePath string) error {
-	conf, err := model.ReadInConfig(configFilePath)
+	var err error
+	Config, err = model.ReadInConfig(configFilePath)
 	if err != nil {
 		return err
 	}
-	for i := 0; i < len(conf.Servers); i++ {
-		server := conf.Servers[i]
-		for j := 0; j < len(conf.Servers[i].Tags); j++ {
-			tag := conf.Servers[i].Tags[j]
+	for i := 0; i < len(Config.Servers); i++ {
+		server := Config.Servers[i]
+		for j := 0; j < len(Config.Servers[i].Tags); j++ {
+			tag := Config.Servers[i].Tags[j]
 			if len(Servers[tag]) == 0 {
 				Tags = append(Tags, tag)
 			}
-			Servers[tag] = append(Servers[tag], &server)
+			Servers[tag] = append(Servers[tag], server)
 		}
 	}
-	return nil
+	return err
 }

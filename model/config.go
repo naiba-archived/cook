@@ -7,7 +7,7 @@ import (
 
 // Config ..
 type Config struct {
-	Servers []Server
+	Servers []*Server
 }
 
 // ReadInConfig ..
@@ -22,6 +22,18 @@ func ReadInConfig(path string) (*Config, error) {
 	err = viper.Unmarshal(&c)
 	if err != nil {
 		return nil, err
+	}
+
+	for i := 0; i < len(c.Servers); i++ {
+		if c.Servers[i].Port == "" {
+			c.Servers[i].Port = "22"
+		}
+		if c.Servers[i].User == "" {
+			c.Servers[i].User = "root"
+		}
+		if c.Servers[i].Password == "" && c.Servers[i].IdentityFile == "" {
+			c.Servers[i].IdentityFile = "~/.ssh/id_rsa"
+		}
 	}
 
 	viper.OnConfigChange(func(in fsnotify.Event) {

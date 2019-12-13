@@ -8,6 +8,6 @@ type Server struct {
 	IdentityFile string
 	Port         string
 
-	Lable string
+	Label string
 	Tags  []string
 }
