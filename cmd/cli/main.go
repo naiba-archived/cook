@@ -28,7 +28,7 @@ const (
 var configFilePath string
 
 func cli() {
-	executor := &cmd.Executor{}
+	executor := cmd.NewExecutor()
 	completer := cmd.NewCompleter()
 	p := prompt.New(
 		executor.Exec,

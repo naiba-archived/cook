@@ -3,6 +3,7 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"os"
 	"reflect"
@@ -18,10 +19,23 @@ import (
 	"github.com/p14yground/cook/pkg/log"
 )
 
+// NewExecutor ..
+func NewExecutor() *Executor {
+	var e Executor
+	e.sessions = make(map[string]*sshRW)
+	return &e
+}
+
+type sshRW struct {
+	Stdout io.Reader
+	Stderr io.Reader
+	Stdin  io.Writer
+}
+
 // Executor ..
 type Executor struct {
-	conn    []*ssh.Session
-	servers []*model.Server
+	sessions map[string]*sshRW
+	servers  []*model.Server
 }
 
 // Exec ..
@@ -45,14 +59,67 @@ func (e *Executor) Exec(s string) {
 				e.connect(nil, true)
 				return
 			case "--tags":
+				if len(args) != 3 {
+					break
+				}
 				e.connect(strings.Split(args[2], ","), false)
 				return
 			}
 		}
 		err = errors.New("参数不完整")
+	case "exec":
+		command := s[4:]
+		if len(command) == 0 {
+			err = errors.New("空命令")
+			break
+		}
+		e.run(command)
+		return
 	}
 
 	log.Printf("错误命令：%s %v", s, err)
+}
+
+func (e *Executor) run(command string) {
+	if len(e.sessions) == 0 {
+		log.Printf("没有建立的连接")
+		return
+	}
+	var wg sync.WaitGroup
+	wg.Add(len(e.sessions))
+	for host, session := range e.sessions {
+		go func(host string, session *sshRW) {
+			defer wg.Done()
+			var out []byte
+			var errOut []byte
+			var length int
+			log.Printf("在 %s 中执行 %s", host, command)
+			_, err := session.Stdin.Write([]byte(command + "\n"))
+			if err == nil {
+				b := make([]byte, 1024)
+				for {
+					length, err = session.Stdout.Read(b)
+					out = append(out, b[:length]...)
+					if err != nil || length == 0 {
+						break
+					}
+				}
+				for {
+					length, err = session.Stderr.Read(b)
+					errOut = append(errOut, b[:length]...)
+					if err != nil || length == 0 {
+						break
+					}
+				}
+			}
+			if err != nil && err != io.EOF {
+				log.Printf("在 %s 中执行时出现问题：%v", host, err)
+				return
+			}
+			log.Printf("------- [%s] -------\nout: %s \nerr: %s", host, out, errOut)
+		}(host, session)
+	}
+	wg.Wait()
 }
 
 func (e *Executor) connect(tags []string, isAll bool) {
@@ -104,20 +171,29 @@ func (e *Executor) connect(tags []string, isAll bool) {
 				log.Printf("服务器 %s 建立连接失败：%v", addr, err)
 				return
 			}
+			var rw sshRW
 			session, err := client.NewSession()
+			if err == nil {
+				rw.Stdin, err = session.StdinPipe()
+			}
+			if err == nil {
+				rw.Stdout, err = session.StdoutPipe()
+			}
+			if err == nil {
+				rw.Stderr, err = session.StderrPipe()
+			}
+			if err == nil {
+				err = session.Shell()
+			}
 			if err != nil {
 				log.Printf("服务器 %s 开启 Session 失败：%v", addr, err)
 				return
 			}
-			output, err := session.CombinedOutput("pwd")
-			if err != nil {
-				log.Printf("服务器 %s 执行失败：%v", addr, err)
-				return
-			}
-			log.Printf("服务器 %s > %s", addr, output)
+			e.sessions[e.servers[i].Host] = &rw
 		}(i)
 	}
 	wg.Wait()
+	log.Printf("%d 个连接已建立", len(e.sessions))
 }
 
 func merge(a, b []*model.Server) []*model.Server {

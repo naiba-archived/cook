@@ -10,6 +10,7 @@ import (
 
 var commandSuggests = []prompt.Suggest{
 	{Text: "connect", Description: "连接到主机"},
+	{Text: "exec", Description: "批量执行命令"},
 	{Text: "quit", Description: "退出 Cook"},
 }
 
@@ -62,6 +63,7 @@ func (c *Completer) Complete(d prompt.Document) []prompt.Suggest {
 				return prompt.FilterHasPrefix(c.tagSuggests, d.GetWordBeforeCursor(), true)
 			}
 		}
+	case "exec", "quit":
 	default:
 		return prompt.FilterHasPrefix(commandSuggests, d.GetWordBeforeCursor(), true)
 	}
