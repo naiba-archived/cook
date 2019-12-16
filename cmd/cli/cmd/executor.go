@@ -25,13 +25,13 @@ const (
 // NewExecutor ..
 func NewExecutor() *Executor {
 	var e Executor
-	e.clients = make(map[string]*ssh.Client)
+	e.clients = new(sync.Map)
 	return &e
 }
 
 // Executor ..
 type Executor struct {
-	clients map[string]*ssh.Client
+	clients *sync.Map
 	servers []*model.Server
 }
 
@@ -78,13 +78,9 @@ func (e *Executor) Exec(s string) {
 }
 
 func (e *Executor) run(command string) {
-	if len(e.clients) == 0 {
-		log.Printf("没有建立的连接")
-		return
-	}
 	var wg sync.WaitGroup
-	wg.Add(len(e.clients))
-	for host, client := range e.clients {
+	e.clients.Range(func(k, v interface{}) bool {
+		wg.Add(1)
 		go func(host string, client *ssh.Client) {
 			defer wg.Done()
 			log.Printf("[%s] 开始执行 %s", host, command)
@@ -95,12 +91,13 @@ func (e *Executor) run(command string) {
 			}
 			out, err := session.CombinedOutput(command)
 			if err != nil {
-				log.Printf("[%s]执行失败：%s => %v", host, out, err)
+				log.Printf("[%s] 执行失败：%s => %v", host, out, err)
+			} else {
+				log.Printf("----- [%s] log -----\n%s", host, out)
 			}
-			log.Printf("[%s]log：\n%s", host, out)
-
-		}(host, client)
-	}
+		}(k.(string), v.(*ssh.Client))
+		return true
+	})
 	wg.Wait()
 }
 
@@ -142,14 +139,14 @@ func (e *Executor) connect(tags []string, isAll bool) {
 			} else {
 				auth, err := e.publicKeyAuthFunc(e.servers[i].IdentityFile)
 				if err != nil {
-					log.Printf("服务器 %s 读取 IdentityFile 失败：%v", addr, err)
+					log.Printf("服务器 %s 读取 IdentityFile 失败：%v", e.servers[i].Label, err)
 					return
 				}
 				config.Auth = []ssh.AuthMethod{auth}
 			}
 			client, err := ssh.Dial("tcp", addr, config)
 			if err != nil {
-				log.Printf("服务器 %s 建立连接失败：%v", addr, err)
+				log.Printf("服务器 %s 建立连接失败：%v", e.servers[i].Label, err)
 				return
 			}
 			session, err := client.NewSession()
@@ -159,14 +156,13 @@ func (e *Executor) connect(tags []string, isAll bool) {
 				out, err = session.CombinedOutput("whoami")
 			}
 			if err != nil || strings.TrimSpace(string(out)) != e.servers[i].User {
-				log.Printf("服务器 %s 验证失败：%s=>%v", addr, out, err)
+				log.Printf("服务器 %s 验证失败：%s=>%v", e.servers[i].Label, out, err)
 				return
 			}
-			e.clients[e.servers[i].Host] = client
+			e.clients.Store(e.servers[i].Label, client)
 		}(i)
 	}
 	wg.Wait()
-	log.Printf("%d 个连接已建立", len(e.clients))
 }
 
 func (e *Executor) merge(a, b []*model.Server) []*model.Server {
