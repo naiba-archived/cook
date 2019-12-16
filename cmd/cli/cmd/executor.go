@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -19,6 +20,10 @@ import (
 	"github.com/p14yground/cook/pkg/log"
 )
 
+const (
+	endLabel = "cook-exec-label:done"
+)
+
 // NewExecutor ..
 func NewExecutor() *Executor {
 	var e Executor
@@ -27,8 +32,7 @@ func NewExecutor() *Executor {
 }
 
 type sshRW struct {
-	Stdout io.Reader
-	Stderr io.Reader
+	Stdout *bytes.Buffer
 	Stdin  io.Writer
 }
 
@@ -89,34 +93,24 @@ func (e *Executor) run(command string) {
 	wg.Add(len(e.sessions))
 	for host, session := range e.sessions {
 		go func(host string, session *sshRW) {
-			defer wg.Done()
-			var out []byte
-			var errOut []byte
-			var length int
+			var err error
+			allDone := make(chan struct{})
+			defer func() {
+				<-allDone
+				wg.Done()
+			}()
 			log.Printf("在 %s 中执行 %s", host, command)
-			_, err := session.Stdin.Write([]byte(command + "\n"))
-			if err == nil {
-				b := make([]byte, 1024)
-				for {
-					length, err = session.Stdout.Read(b)
-					out = append(out, b[:length]...)
-					if err != nil || length == 0 {
-						break
-					}
-				}
-				for {
-					length, err = session.Stderr.Read(b)
-					errOut = append(errOut, b[:length]...)
-					if err != nil || length == 0 {
-						break
-					}
-				}
-			}
-			if err != nil && err != io.EOF {
+			stdoutClose := make(chan struct{})
+			go func() {
+				out := e.readStdout(session.Stdout, stdoutClose)
+				log.Printf("------- [%s] log -------\n%s------- [%s] -------", host, out, host)
+				close(allDone)
+			}()
+			_, err = fmt.Fprintf(session.Stdin, "%s && echo %s \n", command, endLabel)
+			if err != nil {
 				log.Printf("在 %s 中执行时出现问题：%v", host, err)
-				return
+				close(stdoutClose)
 			}
-			log.Printf("------- [%s] -------\nout: %s \nerr: %s", host, out, errOut)
 		}(host, session)
 	}
 	wg.Wait()
@@ -125,12 +119,12 @@ func (e *Executor) run(command string) {
 func (e *Executor) connect(tags []string, isAll bool) {
 	if isAll {
 		for _, server := range dao.Servers {
-			e.servers = merge(e.servers, server)
+			e.servers = e.merge(e.servers, server)
 		}
 	} else {
 		for i := 0; i < len(tags); i++ {
 			if ss, has := dao.Servers[tags[i]]; has {
-				e.servers = merge(e.servers, ss)
+				e.servers = e.merge(e.servers, ss)
 			} else {
 				log.Printf("Tag：%s, 不存在", tags[i])
 			}
@@ -143,7 +137,6 @@ func (e *Executor) connect(tags []string, isAll bool) {
 	}
 
 	log.Printf("即将连接 %d 个服务器：%v", len(e.servers), labels)
-
 	var wg sync.WaitGroup
 	wg.Add(len(e.servers))
 	for i := 0; i < len(e.servers); i++ {
@@ -159,7 +152,7 @@ func (e *Executor) connect(tags []string, isAll bool) {
 			if e.servers[i].Password != "" {
 				config.Auth = []ssh.AuthMethod{ssh.Password(e.servers[i].Password)}
 			} else {
-				auth, err := publicKeyAuthFunc(e.servers[i].IdentityFile)
+				auth, err := e.publicKeyAuthFunc(e.servers[i].IdentityFile)
 				if err != nil {
 					log.Printf("服务器 %s 读取 IdentityFile 失败：%v", addr, err)
 					return
@@ -177,16 +170,32 @@ func (e *Executor) connect(tags []string, isAll bool) {
 				rw.Stdin, err = session.StdinPipe()
 			}
 			if err == nil {
-				rw.Stdout, err = session.StdoutPipe()
-			}
-			if err == nil {
-				rw.Stderr, err = session.StderrPipe()
+				var stdout bytes.Buffer
+				session.Stdout = &stdout
+				session.Stderr = &stdout
+				rw.Stdout = &stdout
 			}
 			if err == nil {
 				err = session.Shell()
 			}
 			if err != nil {
 				log.Printf("服务器 %s 开启 Session 失败：%v", addr, err)
+				return
+			}
+			done := make(chan struct{})
+			readCh := make(chan struct{})
+			go func() {
+				e.readStdout(rw.Stdout, readCh)
+				close(done)
+			}()
+			fmt.Fprintf(rw.Stdin, "\n\necho cook-ssh-executor && date && whoami && echo %s \n", endLabel)
+			tm := time.NewTimer(time.Second * 10)
+			select {
+			case <-done:
+				tm.Stop()
+			case <-tm.C:
+				log.Printf("服务器 %s 建立连接超时", addr)
+				close(readCh)
 				return
 			}
 			e.sessions[e.servers[i].Host] = &rw
@@ -196,7 +205,27 @@ func (e *Executor) connect(tags []string, isAll bool) {
 	log.Printf("%d 个连接已建立", len(e.sessions))
 }
 
-func merge(a, b []*model.Server) []*model.Server {
+func (e *Executor) readStdout(stdout *bytes.Buffer, stdoutClose <-chan struct{}) string {
+	var all []byte
+	for {
+		select {
+		case <-stdoutClose:
+			return string(all)
+		default:
+			line, err := stdout.ReadString('\n')
+			if strings.TrimSpace(line) == endLabel {
+				return string(all)
+			}
+			all = append(all, []byte(line)...)
+			if err != nil && err != io.EOF {
+				return string(all)
+			}
+			time.Sleep(time.Millisecond * 300)
+		}
+	}
+}
+
+func (e *Executor) merge(a, b []*model.Server) []*model.Server {
 OUT:
 	for i := 0; i < len(b); i++ {
 		for j := 0; j < len(a); j++ {
@@ -209,7 +238,7 @@ OUT:
 	return a
 }
 
-func publicKeyAuthFunc(kPath string) (ssh.AuthMethod, error) {
+func (e *Executor) publicKeyAuthFunc(kPath string) (ssh.AuthMethod, error) {
 	keyPath, err := homedir.Expand(kPath)
 	if err != nil {
 		return nil, err
