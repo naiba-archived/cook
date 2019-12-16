@@ -1,10 +1,8 @@
 package cmd
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
-	"io"
 	"io/ioutil"
 	"os"
 	"reflect"
@@ -27,19 +25,14 @@ const (
 // NewExecutor ..
 func NewExecutor() *Executor {
 	var e Executor
-	e.sessions = make(map[string]*sshRW)
+	e.clients = make(map[string]*ssh.Client)
 	return &e
-}
-
-type sshRW struct {
-	Stdout *bytes.Buffer
-	Stdin  io.Writer
 }
 
 // Executor ..
 type Executor struct {
-	sessions map[string]*sshRW
-	servers  []*model.Server
+	clients map[string]*ssh.Client
+	servers []*model.Server
 }
 
 // Exec ..
@@ -85,33 +78,28 @@ func (e *Executor) Exec(s string) {
 }
 
 func (e *Executor) run(command string) {
-	if len(e.sessions) == 0 {
+	if len(e.clients) == 0 {
 		log.Printf("没有建立的连接")
 		return
 	}
 	var wg sync.WaitGroup
-	wg.Add(len(e.sessions))
-	for host, session := range e.sessions {
-		go func(host string, session *sshRW) {
-			var err error
-			allDone := make(chan struct{})
-			defer func() {
-				<-allDone
-				wg.Done()
-			}()
-			log.Printf("在 %s 中执行 %s", host, command)
-			stdoutClose := make(chan struct{})
-			go func() {
-				out := e.readStdout(session.Stdout, stdoutClose)
-				log.Printf("------- [%s] log -------\n%s------- [%s] -------", host, out, host)
-				close(allDone)
-			}()
-			_, err = fmt.Fprintf(session.Stdin, "%s && echo %s \n", command, endLabel)
+	wg.Add(len(e.clients))
+	for host, client := range e.clients {
+		go func(host string, client *ssh.Client) {
+			defer wg.Done()
+			log.Printf("[%s] 开始执行 %s", host, command)
+			session, err := client.NewSession()
 			if err != nil {
-				log.Printf("在 %s 中执行时出现问题：%v", host, err)
-				close(stdoutClose)
+				log.Printf("[%s] 开启 Session 失败：%v", host, err)
+				return
 			}
-		}(host, session)
+			out, err := session.CombinedOutput(command)
+			if err != nil {
+				log.Printf("[%s]执行失败：%s => %v", host, out, err)
+			}
+			log.Printf("[%s]log：\n%s", host, out)
+
+		}(host, client)
 	}
 	wg.Wait()
 }
@@ -164,65 +152,21 @@ func (e *Executor) connect(tags []string, isAll bool) {
 				log.Printf("服务器 %s 建立连接失败：%v", addr, err)
 				return
 			}
-			var rw sshRW
 			session, err := client.NewSession()
+			var out []byte
 			if err == nil {
-				rw.Stdin, err = session.StdinPipe()
+				defer session.Close()
+				out, err = session.CombinedOutput("whoami")
 			}
-			if err == nil {
-				var stdout bytes.Buffer
-				session.Stdout = &stdout
-				session.Stderr = &stdout
-				rw.Stdout = &stdout
-			}
-			if err == nil {
-				err = session.Shell()
-			}
-			if err != nil {
-				log.Printf("服务器 %s 开启 Session 失败：%v", addr, err)
+			if err != nil || strings.TrimSpace(string(out)) != e.servers[i].User {
+				log.Printf("服务器 %s 验证失败：%s=>%v", addr, out, err)
 				return
 			}
-			done := make(chan struct{})
-			readCh := make(chan struct{})
-			go func() {
-				e.readStdout(rw.Stdout, readCh)
-				close(done)
-			}()
-			fmt.Fprintf(rw.Stdin, "\n\necho cook-ssh-executor && date && whoami && echo %s \n", endLabel)
-			tm := time.NewTimer(time.Second * 10)
-			select {
-			case <-done:
-				tm.Stop()
-			case <-tm.C:
-				log.Printf("服务器 %s 建立连接超时", addr)
-				close(readCh)
-				return
-			}
-			e.sessions[e.servers[i].Host] = &rw
+			e.clients[e.servers[i].Host] = client
 		}(i)
 	}
 	wg.Wait()
-	log.Printf("%d 个连接已建立", len(e.sessions))
-}
-
-func (e *Executor) readStdout(stdout *bytes.Buffer, stdoutClose <-chan struct{}) string {
-	var all []byte
-	for {
-		select {
-		case <-stdoutClose:
-			return string(all)
-		default:
-			line, err := stdout.ReadString('\n')
-			if strings.TrimSpace(line) == endLabel {
-				return string(all)
-			}
-			all = append(all, []byte(line)...)
-			if err != nil && err != io.EOF {
-				return string(all)
-			}
-			time.Sleep(time.Millisecond * 300)
-		}
-	}
+	log.Printf("%d 个连接已建立", len(e.clients))
 }
 
 func (e *Executor) merge(a, b []*model.Server) []*model.Server {
